@@ -85,7 +85,7 @@ module Bundler
         gem_line ? parse_gem(gem_line) : nil
       end
 
-    private
+      private
 
       def lines(path)
         return [] unless path.file?
@@ -95,8 +95,8 @@ module Bundler
       end
 
       def parse_gem(line)
-        @gem_parser ||= GemParser.new
-        @gem_parser.parse(line)
+        @dependency_parser ||= GemParser.new
+        @dependency_parser.parse(line)
       end
 
       def info_roots

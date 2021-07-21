@@ -6,23 +6,27 @@ on:
   push:
     branches:
       - master
+      - 3.2
 
 jobs:
   ubuntu_lint:
-    runs-on: ubuntu-latest
+    name: Lint
+    runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v2
       - name: Setup ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: 2.6.5
+          ruby-version: 3.0.2
           bundler: none
       - name: Install Dependencies
         run: rake setup
       - name: Run Lint
         run: rake rubocop
-      - name: Install Dependencies in Bundler
-        run: bin/rake spec:deps
+      - name: Generate docs
+        run: rake docs
+      - name: Install & Check Dependencies
+        run: bin/rake dev:frozen_deps
         working-directory: ./bundler
       - name: "Check RVM integration, man:check"
         run: bin/rake check_rvm_integration man:check

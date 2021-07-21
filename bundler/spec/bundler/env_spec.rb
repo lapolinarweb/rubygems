@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
-require "openssl"
 require "bundler/settings"
+require "openssl"
 
 RSpec.describe Bundler::Env do
   let(:git_proxy_stub) { Bundler::Source::Git::GitProxy.new(nil, nil, nil) }
@@ -46,6 +46,8 @@ RSpec.describe Bundler::Env do
         skip "needs to use a valid HOME" if Gem.win_platform? && RUBY_VERSION < "2.6.0"
 
         with_clear_paths("HOME", "/a/b/c") do
+          allow(File).to receive(:exist?)
+          allow(File).to receive(:exist?).with("/a/b/c/.gem").and_return(true)
           out = described_class.report
           expect(out).to include("User Path   /a/b/c/.gem")
         end
@@ -58,7 +60,7 @@ RSpec.describe Bundler::Env do
         end
       end
 
-    private
+      private
 
       def with_clear_paths(env_var, env_value)
         old_env_var = ENV[env_var]
@@ -108,6 +110,20 @@ RSpec.describe Bundler::Env do
 
       it "prints the environment" do
         expect(output).to start_with("## Environment")
+      end
+    end
+
+    context "when there's bundler config with credentials" do
+      before do
+        bundle "config set https://localgemserver.test/ user:pass"
+      end
+
+      let(:output) { described_class.report(:print_gemfile => true) }
+
+      it "prints the config with redacted values" do
+        expect(output).to include("https://localgemserver.test")
+        expect(output).to include("user:[REDACTED]")
+        expect(output).to_not include("user:pass")
       end
     end
 

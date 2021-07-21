@@ -7,49 +7,49 @@ assignees: ''
 
 ---
 
+<!--
+
 Thank you for contributing to the [rubygems](https://github.com/rubygems/rubygems) repository, and specifically to the [Bundler](https://bundler.io/) gem.
 
-Before processing your issue please confirm that:
+Before opening your issue, make sure you have checked [our filing issues guide](https://github.com/rubygems/rubygems/blob/master/bundler/doc/contributing/ISSUES.md).
 
-- [ ] You checked all the following documents and couldn't find a solution for your issue:
+Please fill in the following sections so we can process your issue as fast as possible:
 
-- [Troubleshooting common issues](https://github.com/rubygems/bundler/blob/master/doc/TROUBLESHOOTING.md)
-- [Bundler documentation site](https://bundler.io/)
-- [Bundler man pages](https://bundler.io/man/bundle.1.html)
-- [Bundler command line reference](https://bundler.io/v2.0/commands.html)
+-->
 
-If you haven't done that, please do it before creating a new issue.
+### Describe the problem as clearly as you can
 
-Please answer the following questions so we can process your issue as fast as possible:
+<!-- Replace this with an explanation of the problem you are having. Be as much clear and precise as you can. -->
 
-1. Do you have a reproduction script? It would be really helpful for us if you provide one. Examples: [Sample repro script for Bundler issues](https://gist.github.com/xaviershay/6207550), [Another sample repro script for Bundler issues](https://gist.github.com/xaviershay/6295889).
+### Post steps to reproduce the problem
 
-    Script URL: 
+<!--
 
-2. What are you trying to accomplish?
+Fill this with a list of steps maintainers can follow to reproduce your issue. Note that while you are seeing this issue in your computer, maintainers might not see the same thing on theirs. There is a number of things that could influence this:
 
-    Your answer:
+* How your ruby is setup (OS package, from source, using a version manager).
+* How bundler & rubygems are configured.
+* The version of each involved piece of software that you are using.
+* ...
 
-3. What command did you run?
+The more complete the steps to simulate your particular environment are, the easier it will be for maintainers to reproduce your issue on their machines.
 
-    Your answer:
+Ideally, we recommend you to set up the list of steps as a [Dockerfile](https://docs.docker.com/get-started/). A Dockerfile provides a neutral environment that should give the same results, no matter where it's run.
 
-4. What were you expecting to happen?
+-->
 
-    Your answer:
+### Which command did you run?
 
-5. What actually happened?
+<!-- Replace this with the specific command that is causing trouble. -->
 
-    Your answer:
+### What were you expecting to happen?
 
-6. Is there an exception backtrace? If so, please copy it below.
+<!-- Replace this with the results you expected before running the command. -->
 
-    Your answer:
+### What actually happened?
 
-7. Please run `bundle env` and paste the output below:
+<!-- Replace this with the actual result you got. Paste the output of your command here. -->
 
-    Your answer:
+### If not included with the output of your command, run `bundle env` and paste the output below
 
-For more information please check [Filing Issues: a guide](https://github.com/rubygems/rubygems/blob/master/bundler/doc/contributing/ISSUES.md).
-
-Thank you!
+<!-- Replace this with the result of `bundle env`. Don't forget to anonymize any private data! -->

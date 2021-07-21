@@ -1,13 +1,8 @@
 # frozen_string_literal: true
-require 'rubygems/test_case'
+require_relative 'helper'
 require 'rubygems/indexer'
 
-unless defined?(Builder::XChar)
-  warn "Gem::Indexer tests are being skipped.  Install builder gem."
-end
-
 class TestGemIndexer < Gem::TestCase
-
   def setup
     super
 
@@ -359,5 +354,4 @@ class TestGemIndexer < Gem::TestCase
     file = File.join dir, name
     refute File.exist?(file), "#{file} exists"
   end
-
-end if defined?(Builder::XChar)
+end

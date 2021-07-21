@@ -9,40 +9,33 @@ module Gem
     Gem.ruby = ENV["RUBY"]
   end
 
-  if version = ENV["BUNDLER_SPEC_RUBYGEMS_VERSION"]
-    remove_const(:VERSION) if const_defined?(:VERSION)
-    VERSION = version
+  @default_dir = ENV["BUNDLER_GEM_DEFAULT_DIR"] if ENV["BUNDLER_GEM_DEFAULT_DIR"]
+
+  if ENV["BUNDLER_SPEC_PLATFORM"]
+    class Platform
+      @local = new(ENV["BUNDLER_SPEC_PLATFORM"])
+    end
+    @platforms = [Gem::Platform::RUBY, Gem::Platform.local]
+
+    if ENV["BUNDLER_SPEC_PLATFORM"] == "ruby"
+      class << self
+        remove_method :finish_resolve
+
+        def finish_resolve
+          []
+        end
+      end
+    end
   end
 
-  class Platform
-    @local = new(ENV["BUNDLER_SPEC_PLATFORM"]) if ENV["BUNDLER_SPEC_PLATFORM"]
+  if ENV["BUNDLER_SPEC_GEM_SOURCES"]
+    @sources = [ENV["BUNDLER_SPEC_GEM_SOURCES"]]
   end
-  @platforms = [Gem::Platform::RUBY, Gem::Platform.local]
 
   # We only need this hack for rubygems versions without the BundlerVersionFinder
-  if Gem::Version.new(Gem::VERSION) < Gem::Version.new("2.7.0") || ENV["BUNDLER_SPEC_DISABLE_DEFAULT_BUNDLER_GEM"]
+  if Gem.rubygems_version < Gem::Version.new("2.7.0")
     @path_to_default_spec_map.delete_if do |_path, spec|
       spec.name == "bundler"
     end
-  end
-end
-
-if ENV["BUNDLER_SPEC_VERSION"]
-  require_relative "path"
-  require "#{Spec::Path.lib_dir}/bundler/version"
-
-  module Bundler
-    remove_const(:VERSION) if const_defined?(:VERSION)
-    VERSION = ENV["BUNDLER_SPEC_VERSION"].dup
-  end
-end
-
-if ENV["BUNDLER_SPEC_WINDOWS"] == "true"
-  require_relative "path"
-  require "#{Spec::Path.lib_dir}/bundler/constants"
-
-  module Bundler
-    remove_const :WINDOWS if defined?(WINDOWS)
-    WINDOWS = true
   end
 end

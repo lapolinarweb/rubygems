@@ -13,7 +13,6 @@ contributors to follow to reduce the time it takes to get changes merged in.
     *   Match indentation (two spaces)
     *   Match coding style (run `rake rubocop`)
 
-
 3.  If any new files are added or existing files removed in a commit or PR,
     please update the `Manifest.txt` accordingly. This can be done by running
     `rake update_manifest`
@@ -31,13 +30,26 @@ here: https://guides.rubygems.org/contributing/
 ## Getting Started
 
     $ rake setup
-    $ rake test
 
-> Optional you can configure git hooks with: rake git_hooks
+> Optionally you can configure git hooks with: rake git_hooks
 
 To run commands like `gem install` from the repo:
 
     $ ruby -Ilib bin/gem install
+
+### Running Tests
+
+To run the entire test suite you can use: 
+
+    $ rake test
+
+To run an individual test file located for example in `test/rubygems/test_deprecate.rb` you can use: 
+
+    $ ruby -Ilib:test test/rubygems/test_deprecate.rb 
+    
+And to run an individual test method named `test_default` within a test file, you can use: 
+
+    $ ruby -Ilib:test test/rubygems/test_deprecate.rb -n /test_default/ 
 
 To run bundler test:
 
@@ -64,27 +76,42 @@ can help with. That are marked with a light gray `contribution: *`
 
 ### Type
 
-Most Issues or pull requests will have a light green `type: *` label,  which
-describes the type of the issue or pull request.
+Issues might have a light green `type: *` label,  which describes the type of
+the issue.
 
 *   **bug report** - An issue describing a bug in rubygems. This would be
     something that is broken, confusing, unexpected behavior etc.
-*   **bug fix** - A pull request that fixes a bug report.
 *   **feature request** - An issue describing a request for a new feature or
     enhancement.
-*   **feature implementation** - A pull request implementing a feature
-    request.
 *   **question** - An issue that is a more of a question than a call for
     specific changes in the codebase.
-*   **cleanup** - Generally for a pull request that improves the code base
-    without fixing a bug or implementing a feature.
-*   **major bump** - This issue or pull request requires a major version bump
+*   **cleanup** - An issue that proposes cleanups to the code base without
+    fixing a bug or implementing a feature.
+*   **major bump** - This issue  request requires a major version bump
 *   **administrative** - This issue relates to administrative tasks that need
     to take place as it relates to rubygems
 *   **documentation** - This issue relates to improving the documentation for
     in this repo. Note that much of the rubygems documentation is here:
     https://github.com/rubygems/guides
 
+Pull request might have a light orange `rubygems: *` or a light blue `bundler:
+*` label which describes the pull request according to the following criteria:
+
+*   **security fix** - A pull request that fixes a security issue.
+*   **breaking change** - A pull request including any change that requires a
+    major version bump.
+*   **major enhancement** - A pull request including a backwards compatible
+    change worth a special mention in the changelog
+*   **deprecation** - A pull request that introduces a deprecation.
+*   **feature** - A pull request implementing a feature request.
+*   **deprecation** - A pull request that implements a performance improvement.
+*   **documentation** - A pull request introducing documentation improvements
+    worth mentioning to end users.
+*   **minor enhancements** - A pull request introducing small but user visible changes.
+*   **bug fix** - A pull request that fixes a bug report.
+
+In the case of `bundler`, these labels are set by maintainers on PRs and have
+special importance because they are used to automatically build the changelog.
 
 ### Workflow / Status
 
@@ -93,13 +120,13 @@ where it is in the process from being submitted to being closed.  These are
 listed in rough  progression order from submitted to closed.
 
 *   **triage** - This is an issue or pull request that needs to be properly
-    labeled by by a maintainer.
+    labeled by a maintainer.
 *   **confirmed** - This issue/pull request has been accepted as valid, but is
     not yet immediately ready for work.
 *   **ready** - An issue that is available for collaboration. This issue
     should have existing discussion on the problem, and a description of how
     to go about solving it.
-*   **working** - An issue that has a specific invidual assigned to and
+*   **working** - An issue that has a specific individual assigned to and
     planning to do work on it.
 *   **user feedback required** - The issue/pull request is blocked pending
     more feedback from an end user
@@ -117,7 +144,7 @@ closed reason labels are maroon `closed: *`.
 
 *   **duplicate** - This is a duplicate of an existing bug. The comments must
     reference the existing issue.
-*   **abandonded** - This is an issue/pull request that has aged off, is no
+*   **abandoned** - This is an issue/pull request that has aged off, is no
     longer applicable or similar.
 *   **declined** - An issue that won't be fixed/implemented or a pull request
     that is not accepted.

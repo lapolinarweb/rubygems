@@ -6,21 +6,31 @@ on:
   push:
     branches:
       - master
+      - 3.2
 
 jobs:
   windows_bundler:
-    runs-on: windows-latest
+    name: Bundler on Windows (${{ matrix.ruby.name }})
+
+    runs-on: windows-2019
+
+    env:
+      RGV: ..
 
     strategy:
+      fail-fast: false
       matrix:
-        ruby: [ '2.4', '2.5', '2.6' ]
+        ruby:
+          - { name: jruby-9.2, value: jruby-9.2.19.0 }
+          - { name: ruby-2.5, value: 2.5.9 }
+          - { name: ruby-3.0, value: 3.0.2 }
 
     steps:
       - uses: actions/checkout@v2
       - name: Setup ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: ${{ matrix.ruby }}
+          ruby-version: ${{ matrix.ruby.value }}
           bundler: none
       - name: Install dependencies
         run: |
@@ -29,6 +39,7 @@ jobs:
         shell: bash
       - name: Run specs
         run: |
-          bin/parallel_rspec spec
+          bin/parallel_rspec
         working-directory: ./bundler
         shell: bash
+        if: "!startsWith(matrix.ruby.name, 'jruby')"
