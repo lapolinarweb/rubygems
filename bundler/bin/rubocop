@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-
-cd "${BASH_SOURCE[0]%/*}/../.." || exit 1
-
-util/rubocop --config bundler/.rubocop.yml "$@" bundler

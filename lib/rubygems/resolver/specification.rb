@@ -1,11 +1,11 @@
 # frozen_string_literal: true
+
 ##
 # A Resolver::Specification contains a subset of the information
 # contained in a Gem::Specification.  Only the information necessary for
 # dependency resolution in the resolver is included.
 
 class Gem::Resolver::Specification
-
   ##
   # The dependencies of the gem for this specification
 
@@ -45,15 +45,40 @@ class Gem::Resolver::Specification
   attr_reader :version
 
   ##
+  # The required_ruby_version constraint for this specification.
+
+  attr_reader :required_ruby_version
+
+  ##
+  # The required_ruby_version constraint for this specification.
+
+  attr_reader :required_rubygems_version
+
+  ##
+  # The time this gem version was published, when the source provides it
+  # (compact index v2), nil otherwise.
+
+  attr_reader :created_at
+
+  ##
+  # The content address of this specification.
+
+  attr_reader :content_address
+
+  ##
   # Sets default instance variables for the specification.
 
   def initialize
+    @created_at   = nil
     @dependencies = nil
     @name         = nil
     @platform     = nil
     @set          = nil
     @source       = nil
     @version      = nil
+    @required_ruby_version = Gem::Requirement.default
+    @required_rubygems_version = Gem::Requirement.default
+    @content_address = nil
   end
 
   ##
@@ -82,11 +107,13 @@ class Gem::Resolver::Specification
   # specification.
 
   def install(options = {})
-    require 'rubygems/installer'
+    require_relative "../installer"
 
     gem = download options
 
-    installer = Gem::Installer.at gem, options
+    installer = Gem::Installer.at gem, options.merge(
+      content_address: (spec.content_address if Gem::ContentAddress.content_addressed?(spec, validate_ruby_abi: false))
+    )
 
     yield installer if block_given?
 
@@ -105,11 +132,10 @@ class Gem::Resolver::Specification
   # Returns true if this specification is installable on this platform.
 
   def installable_platform?
-    Gem::Platform.match spec.platform
+    Gem::Platform.match_spec? spec
   end
 
   def local? # :nodoc:
     false
   end
-
 end

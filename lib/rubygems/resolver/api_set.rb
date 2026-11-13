@@ -1,12 +1,14 @@
 # frozen_string_literal: true
+
 ##
-# The global rubygems pool, available via the rubygems.org API.
+# The global rubygems pool, available via the Compact Index API.
 # Returns instances of APISpecification.
 
 class Gem::Resolver::APISet < Gem::Resolver::Set
+  autoload :GemParser, "rubygems/resolver/api_set/gem_parser"
 
   ##
-  # The URI for the dependency API this APISet uses.
+  # The URI for the Compact Index API this APISet uses.
 
   attr_reader :dep_uri # :nodoc:
 
@@ -21,19 +23,20 @@ class Gem::Resolver::APISet < Gem::Resolver::Set
   attr_reader :uri
 
   ##
-  # Creates a new APISet that will retrieve gems from +uri+ using the RubyGems
-  # API URL +dep_uri+ which is described at
-  # https://guides.rubygems.org/rubygems-org-api
+  # Creates a new APISet that will retrieve gems from +uri+ using the Compact
+  # Index API URL +dep_uri+ which is described at
+  # https://guides.rubygems.org/rubygems-org-compact-index-api
 
-  def initialize(dep_uri = 'https://rubygems.org/api/v1/dependencies')
+  def initialize(dep_uri = "https://index.rubygems.org/info/")
     super()
 
-    dep_uri = URI dep_uri unless URI === dep_uri
+    dep_uri = Gem::URI dep_uri unless Gem::URI === dep_uri
 
     @dep_uri = dep_uri
-    @uri     = dep_uri + '../..'
+    @uri     = dep_uri + ".."
 
-    @data   = Hash.new { |h,k| h[k] = [] }
+    @client = nil
+    @data   = Hash.new {|h,k| h[k] = [] }
     @source = Gem::Source.new @uri
 
     @to_fetch = []
@@ -53,7 +56,7 @@ class Gem::Resolver::APISet < Gem::Resolver::Set
     end
 
     versions(req.name).each do |ver|
-      if req.dependency.match? req.name, ver[:number]
+      if req.dependency.match? req.name, ver[:number], @prerelease
         res << Gem::Resolver::APISpecification.new(self, ver)
       end
     end
@@ -67,39 +70,28 @@ class Gem::Resolver::APISet < Gem::Resolver::Set
 
   def prefetch(reqs)
     return unless @remote
-    names = reqs.map { |r| r.dependency.name }
+    names = reqs.map {|r| r.dependency.name }
     needed = names - @data.keys - @to_fetch
 
     @to_fetch += needed
   end
 
   def prefetch_now # :nodoc:
-    needed, @to_fetch = @to_fetch, []
+    needed = @to_fetch
+    @to_fetch = []
 
-    uri = @dep_uri + "?gems=#{needed.sort.join ','}"
-    str = Gem::RemoteFetcher.fetcher.fetch_path uri
-
-    loaded = []
-
-    Marshal.load(str).each do |ver|
-      name = ver[:name]
-
-      @data[name] << ver
-      loaded << name
-    end
-
-    (needed - loaded).each do |missing|
-      @data[missing] = []
+    needed.sort.each do |name|
+      versions(name)
     end
   end
 
   def pretty_print(q) # :nodoc:
-    q.group 2, '[APISet', ']' do
+    q.group 2, "[APISet", "]" do
       q.breakable
       q.text "URI: #{@dep_uri}"
 
       q.breakable
-      q.text 'gem names:'
+      q.text "gem names:"
       q.pp @data.keys
     end
   end
@@ -108,18 +100,28 @@ class Gem::Resolver::APISet < Gem::Resolver::Set
   # Return data for all versions of the gem +name+.
 
   def versions(name) # :nodoc:
-    if @data.key?(name)
-      return @data[name]
+    return @data[name] if @data.key?(name)
+
+    infos = begin
+      client.fetch_info(name)
+    rescue Gem::RemoteFetcher::FetchError, Gem::CompactIndexClient::Error
+      []
     end
 
-    uri = @dep_uri + "?gems=#{name}"
-    str = Gem::RemoteFetcher.fetcher.fetch_path uri
+    infos.each do |_, number, suffix, dependencies, requirements|
+      suffix ||= "ruby"
+      dependencies = dependencies.map {|dep_name, reqs| [dep_name, reqs.join(", ")] }
+      requirements = requirements.map {|req_name, reqs| [req_name.to_sym, reqs] }.to_h
 
-    Marshal.load(str).each do |ver|
-      @data[ver[:name]] << ver
+      @data[name] << { name: name, number: number, suffix: suffix, dependencies: dependencies, requirements: requirements }
     end
 
     @data[name]
   end
 
+  private
+
+  def client # :nodoc:
+    @client ||= @source.compact_index_client
+  end
 end

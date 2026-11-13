@@ -1,45 +1,46 @@
-
 # frozen_string_literal: true
-require 'rubygems/test_case'
-require 'rubygems/commands/build_command'
-require 'rubygems/package'
+
+require_relative "helper"
+require "rubygems/commands/build_command"
+require "rubygems/package"
 
 class TestGemCommandsBuildCommand < Gem::TestCase
-
-  CERT_FILE = cert_path 'public3072'
-  SIGNING_KEY = key_path 'private3072'
-
-  EXPIRED_CERT_FILE = cert_path 'expired'
-  PRIVATE_KEY_FILE  = key_path 'private'
-
   def setup
     super
 
-    readme_file = File.join(@tempdir, 'README.md')
+    readme_file = File.join(@tempdir, "README.md")
 
-    File.open readme_file, 'w' do |f|
-      f.write 'My awesome gem'
+    begin
+      umask_orig = File.umask(2)
+      File.open readme_file, "w" do |f|
+        f.write "My awesome gem"
+      end
+    ensure
+      File.umask(umask_orig)
     end
 
-    @gem = util_spec 'some_gem' do |s|
-      s.license = 'AGPL-3.0'
-      s.files = ['README.md']
+    @gem = util_spec "some_gem" do |s|
+      s.license = "AGPL-3.0-only"
+      s.files = ["README.md"]
+      s.required_ruby_version = "2.3.0"
     end
 
     @cmd = Gem::Commands::BuildCommand.new
   end
 
-  def test_handle_options
+  def test_handle_options_force_strict_platform
     @cmd.handle_options %w[--force --strict]
 
     assert @cmd.options[:force]
     assert @cmd.options[:strict]
+    assert @cmd.handles?(%W[--platform #{Gem::Platform.local}])
+    assert_includes Gem.platforms, Gem::Platform.local
   end
 
   def test_options_filename
     gemspec_file = File.join(@tempdir, @gem.spec_name)
 
-    File.open gemspec_file, 'w' do |gs|
+    File.open gemspec_file, "w" do |gs|
       gs.write @gem.to_ruby
     end
 
@@ -69,12 +70,14 @@ class TestGemCommandsBuildCommand < Gem::TestCase
     refute @cmd.options[:force]
     refute @cmd.options[:strict]
     assert_nil @cmd.options[:output]
+    assert_nil @cmd.options[:ruby_abi]
+    refute @cmd.options[:content_addressable]
   end
 
   def test_execute
     gemspec_file = File.join(@tempdir, @gem.spec_name)
 
-    File.open gemspec_file, 'w' do |gs|
+    File.open gemspec_file, "w" do |gs|
       gs.write @gem.to_ruby
     end
 
@@ -83,17 +86,278 @@ class TestGemCommandsBuildCommand < Gem::TestCase
     util_test_build_gem @gem
   end
 
+  def test_content_addressable_rejects_ruby_platform
+    gem = util_spec "some_gem" do |s|
+      s.license = "AGPL-3.0-only"
+      s.files = ["README.md"]
+      s.platform = Gem::Platform::RUBY
+    end
+
+    gemspec_file = File.join(@tempdir, gem.spec_name)
+    File.open gemspec_file, "w" do |gs|
+      gs.write gem.to_ruby
+    end
+
+    @cmd.handle_options [gemspec_file, "--content-addressable"]
+    error = assert_raise(ArgumentError) do
+      use_ui @ui do
+        Dir.chdir @tempdir do
+          @cmd.execute
+        end
+      end
+    end
+    assert_match(/no platform or a Ruby platform has been set/, error.message)
+  end
+
+  def test_content_addressable_rejects_ineligible_required_ruby_version
+    gem = util_spec "platformed_gem" do |s|
+      s.license = "AGPL-3.0-only"
+      s.files = ["README.md"]
+      s.platform = "arm64-darwin"
+      s.required_ruby_version = ">= 3.3"
+    end
+
+    gemspec_file = File.join(@tempdir, gem.spec_name)
+    File.open gemspec_file, "w" do |gs|
+      gs.write gem.to_ruby
+    end
+
+    @cmd.handle_options [gemspec_file, "--content-addressable"]
+    error = assert_raise(ArgumentError) do
+      use_ui @ui do
+        Dir.chdir @tempdir do
+          @cmd.execute
+        end
+      end
+    end
+    assert_match(/required_ruby_version/, error.message)
+  end
+
+  def test_content_addressable_rejects_conflicting_required_rubygems_version
+    gem = util_spec "platformed_gem" do |s|
+      s.license = "AGPL-3.0-only"
+      s.files = ["README.md"]
+      s.platform = "arm64-darwin"
+      s.required_ruby_version = "~> 3.4.0"
+      s.required_rubygems_version = "< 4.0"
+    end
+
+    gemspec_file = File.join(@tempdir, gem.spec_name)
+    File.open gemspec_file, "w" do |gs|
+      gs.write gem.to_ruby
+    end
+
+    @cmd.handle_options [gemspec_file, "--content-addressable"]
+    error = assert_raise(ArgumentError) do
+      use_ui @ui do
+        Dir.chdir @tempdir do
+          @cmd.execute
+        end
+      end
+    end
+    assert_match(/Cannot build gem for Ruby ABI 3\.4 because required_rubygems_version/, error.message)
+  end
+
+  def test_ruby_abi_sets_required_ruby_version
+    gem = util_spec "platformed_gem" do |s|
+      s.license = "AGPL-3.0-only"
+      s.files = ["README.md"]
+      s.platform = "arm64-darwin"
+    end
+
+    gemspec_file = File.join(@tempdir, gem.spec_name)
+    File.open gemspec_file, "w" do |gs|
+      gs.write gem.to_ruby
+    end
+
+    @cmd.handle_options [gemspec_file, "--ruby-abi", "3.4"]
+    assert_equal "3.4", @cmd.options[:ruby_abi]
+
+    use_ui @ui do
+      Dir.chdir @tempdir do
+        @cmd.execute
+      end
+    end
+
+    files = Dir[File.join(@tempdir, "platformed_gem-2-*.gem")]
+    assert_equal ["platformed_gem-2-arm64-darwin.gem"], files.map {|f| File.basename(f) }
+    spec = Gem::Package.new(files.first).spec
+    assert_equal Gem::Requirement.new("~> 3.4.0"), spec.required_ruby_version
+
+    refute_match(/required_ruby_version was changed/, @ui.error)
+  end
+
+  def test_ruby_abi_overrides_existing_required_ruby_version
+    gem = util_spec "platformed_gem" do |s|
+      s.license = "AGPL-3.0-only"
+      s.files = ["README.md"]
+      s.platform = "arm64-darwin"
+      s.required_ruby_version = "~> 3.3.0"
+    end
+
+    gemspec_file = File.join(@tempdir, gem.spec_name)
+    File.open gemspec_file, "w" do |gs|
+      gs.write gem.to_ruby
+    end
+
+    @cmd.handle_options [gemspec_file, "--ruby-abi", "3.4"]
+    use_ui @ui do
+      Dir.chdir @tempdir do
+        @cmd.execute
+      end
+    end
+
+    assert_match(
+      /WARNING:  required_ruby_version was changed from "~> 3\.3\.0" to "~> 3\.4\.0" for this build because --ruby-abi 3\.4 was given\./,
+      @ui.error
+    )
+
+    files = Dir[File.join(@tempdir, "platformed_gem-2-arm64-darwin.gem")]
+    assert_equal 1, files.size
+    spec = Gem::Package.new(files.first).spec
+    assert_equal Gem::Requirement.new("~> 3.4.0"), spec.required_ruby_version
+  end
+
+  def test_ruby_abi_and_content_addressable_build_content_addressed_gem
+    gem = util_spec "platformed_gem" do |s|
+      s.license = "AGPL-3.0-only"
+      s.files = ["README.md"]
+      s.platform = "arm64-darwin"
+    end
+
+    gemspec_file = File.join(@tempdir, gem.spec_name)
+    File.open gemspec_file, "w" do |gs|
+      gs.write gem.to_ruby
+    end
+
+    @cmd.handle_options [gemspec_file, "--ruby-abi", "3.4", "--content-addressable"]
+    use_ui @ui do
+      Dir.chdir @tempdir do
+        @cmd.execute
+      end
+    end
+
+    files = Dir[File.join(@tempdir, "platformed_gem-2-*.gem")]
+    assert_equal 1, files.size
+    assert_match(/\Aplatformed_gem-2-[0-9a-f]{8}\.gem\z/, File.basename(files.first))
+
+    spec = Gem::Package.new(files.first).spec
+    assert_equal Gem::Requirement.new("~> 3.4.0"), spec.required_ruby_version
+
+    output = @ui.output.split "\n"
+    assert_equal "  Successfully built RubyGem", output.shift
+    assert_equal "  Name: platformed_gem", output.shift
+    assert_equal "  Version: 2", output.shift
+    assert_match(/\A  File: platformed_gem-2-[0-9a-f]{8}\.gem\z/, output.shift)
+    assert_equal "  Platform: arm64-darwin", output.shift
+    assert_equal "  Ruby ABI: 3.4", output.shift
+  end
+
+  def test_content_addressable_produces_deterministic_content_address
+    gemspec = lambda do
+      gem = util_spec "platformed_gem" do |s|
+        s.license = "AGPL-3.0-only"
+        s.files = ["README.md"]
+        s.platform = "arm64-darwin"
+        s.required_ruby_version = "~> 3.4.0"
+      end
+
+      gemspec_file = File.join(@tempdir, gem.spec_name)
+      File.open gemspec_file, "w" do |gs|
+        gs.write gem.to_ruby
+      end
+
+      @cmd.handle_options [gemspec_file, "--content-addressable"]
+      use_ui @ui do
+        Dir.chdir @tempdir do
+          @cmd.execute
+        end
+      end
+    end
+
+    first_build = gemspec.call
+    second_build = gemspec.call
+
+    assert_equal File.basename(first_build), File.basename(second_build)
+  end
+
+  def test_content_addressable_with_output_raises
+    gem = util_spec "platformed_gem" do |s|
+      s.license = "AGPL-3.0-only"
+      s.files = ["README.md"]
+      s.platform = "arm64-darwin"
+      s.required_ruby_version = "~> 3.4.0"
+    end
+
+    gemspec_file = File.join(@tempdir, gem.spec_name)
+    File.open gemspec_file, "w" do |gs|
+      gs.write gem.to_ruby
+    end
+
+    @cmd.handle_options [gemspec_file, "--content-addressable", "--output", "test.gem"]
+    error = assert_raise(ArgumentError) do
+      use_ui @ui do
+        Dir.chdir @tempdir do
+          @cmd.execute
+        end
+      end
+    end
+    assert_match(/Cannot specify an output file name for a content-addressable gem as these gems must use the generated file name./, error.message)
+  end
+
+  def test_execute_platform
+    gemspec_file = File.join(@tempdir, @gem.spec_name)
+
+    File.open gemspec_file, "w" do |gs|
+      gs.write @gem.to_ruby
+    end
+
+    @cmd.options[:args] = [gemspec_file]
+
+    platforms = Gem.platforms.dup
+    begin
+      Gem.platforms << Gem::Platform.new("java")
+
+      spec = util_test_build_gem @gem, suffix: "java"
+    ensure
+      Gem.platforms.replace(platforms)
+    end
+    assert_match spec.platform, "java"
+  end
+
+  def test_execute_platform_option_local
+    local = Gem::Platform.local.to_s
+
+    util_test_build_gem_with_platform_option local, suffix: local
+  end
+
+  def test_execute_platform_option_non_local
+    util_test_build_gem_with_platform_option "java", suffix: "java"
+  end
+
+  def test_execute_platform_option_local_with_gemspec_platform
+    @gem.platform = "arm64-darwin"
+
+    util_test_build_gem_with_platform_option Gem::Platform.local.to_s, suffix: "arm64-darwin"
+  end
+
+  def test_execute_platform_option_non_local_with_gemspec_platform
+    @gem.platform = "arm64-darwin"
+
+    util_test_build_gem_with_platform_option "java", suffix: "arm64-darwin"
+  end
+
   def test_execute_bad_name
     [".", "-", "_"].each do |special_char|
-      gem = util_spec 'some_gem_with_bad_name' do |s|
+      gem = util_spec "some_gem_with_bad_name" do |s|
         s.name = "#{special_char}bad_gem_name"
-        s.license = 'AGPL-3.0'
-        s.files = ['README.md']
+        s.license = "AGPL-3.0"
+        s.files = ["README.md"]
       end
 
       gemspec_file = File.join(@tempdir, gem.spec_name)
 
-      File.open gemspec_file, 'w' do |gs|
+      File.open gemspec_file, "w" do |gs|
         gs.write gem.to_ruby
       end
 
@@ -101,7 +365,7 @@ class TestGemCommandsBuildCommand < Gem::TestCase
 
       use_ui @ui do
         Dir.chdir @tempdir do
-          assert_raises Gem::InvalidSpecificationException do
+          assert_raise Gem::InvalidSpecificationException do
             @cmd.execute
           end
         end
@@ -112,7 +376,7 @@ class TestGemCommandsBuildCommand < Gem::TestCase
   def test_execute_strict_without_warnings
     gemspec_file = File.join(@tempdir, @gem.spec_name)
 
-    File.open gemspec_file, 'w' do |gs|
+    File.open gemspec_file, "w" do |gs|
       gs.write @gem.to_ruby
     end
 
@@ -122,14 +386,32 @@ class TestGemCommandsBuildCommand < Gem::TestCase
     util_test_build_gem @gem
   end
 
+  def test_execute_rubyforge_project_warning
+    rubyforge_gemspec = File.expand_path File.join("specifications", "rubyforge-0.0.1.gemspec"), __dir__
+
+    @cmd.options[:args] = [rubyforge_gemspec]
+
+    use_ui @ui do
+      Dir.chdir @tempdir do
+        @cmd.execute
+      end
+    end
+
+    error = @ui.error.split("\n")
+    assert_equal "WARNING:  rubyforge_project= is deprecated and ignored. Please remove this from your gemspec to ensure that your gem continues to build in the future.", error.shift
+    assert_equal "WARNING:  See https://guides.rubygems.org/specification-reference/ for help", error.shift
+    assert_equal [], error
+  end
+
   def test_execute_strict_with_warnings
-    bad_gem = util_spec 'some_bad_gem' do |s|
-      s.files = ['README.md']
+    bad_gem = util_spec "some_bad_gem" do |s|
+      s.files = ["README.md"]
+      s.required_ruby_version = ">= 1.9.3"
     end
 
     gemspec_file = File.join(@tempdir, bad_gem.spec_name)
 
-    File.open gemspec_file, 'w' do |gs|
+    File.open gemspec_file, "w" do |gs|
       gs.write bad_gem.to_ruby
     end
 
@@ -138,15 +420,16 @@ class TestGemCommandsBuildCommand < Gem::TestCase
 
     use_ui @ui do
       Dir.chdir @tempdir do
-        assert_raises Gem::InvalidSpecificationException do
+        assert_raise Gem::InvalidSpecificationException do
           @cmd.execute
         end
       end
     end
 
     error = @ui.error.split "\n"
-    assert_equal "WARNING:  licenses is empty, but is recommended.  Use a license identifier from", error.shift
-    assert_equal "http://spdx.org/licenses or 'Nonstandard' for a nonstandard license.", error.shift
+    assert_equal "WARNING:  licenses is empty, but is recommended. Use an license identifier from", error.shift
+    assert_equal "https://spdx.org/licenses or 'Nonstandard' for a nonstandard license,", error.shift
+    assert_equal "or set it to nil if you don't want to specify a license.", error.shift
     assert_equal "WARNING:  See https://guides.rubygems.org/specification-reference/ for help", error.shift
     assert_equal [], error
 
@@ -159,15 +442,15 @@ class TestGemCommandsBuildCommand < Gem::TestCase
 
     gemspec_file = File.join(@tempdir, @gem.spec_name)
 
-    File.open gemspec_file, 'w' do |gs|
+    File.open gemspec_file, "w" do |gs|
       gs.write @gem.to_ruby.sub(/11-08/, "11-8")
     end
 
     @cmd.options[:args] = [gemspec_file]
 
     out, err = use_ui @ui do
-      capture_io do
-        assert_raises Gem::MockGemUi::TermError do
+      capture_output do
+        assert_raise Gem::MockGemUi::TermError do
           @cmd.execute
         end
       end
@@ -176,34 +459,34 @@ class TestGemCommandsBuildCommand < Gem::TestCase
     assert_equal "", out
     assert_match(/invalid date format in specification/, err)
 
-    assert_equal '', @ui.output
+    assert_equal "", @ui.output
     assert_equal "ERROR:  Error loading gemspec. Aborting.\n", @ui.error
   end
 
   def test_execute_missing_file
     @cmd.options[:args] = %w[some_gem]
     use_ui @ui do
-      assert_raises Gem::MockGemUi::TermError do
+      assert_raise Gem::MockGemUi::TermError do
         @cmd.execute
       end
     end
 
-    assert_equal '', @ui.output
-    assert_equal "ERROR:  Gemspec file not found: some_gem.gemspec\n", @ui.error
+    assert_equal "", @ui.output
+    assert_equal "ERROR:  Couldn't find a gemspec file matching 'some_gem' in #{@tempdir}\n", @ui.error
   end
 
   def test_execute_outside_dir
-    gemspec_dir = File.join @tempdir, 'build_command_gem'
+    gemspec_dir = File.join @tempdir, "build_command_gem"
     gemspec_file = File.join gemspec_dir, @gem.spec_name
-    readme_file = File.join gemspec_dir, 'README.md'
+    readme_file = File.join gemspec_dir, "README.md"
 
     FileUtils.mkdir_p gemspec_dir
 
-    File.open readme_file, 'w' do |f|
+    File.open readme_file, "w" do |f|
       f.write "My awesome gem"
     end
 
-    File.open gemspec_file, 'w' do |gs|
+    File.open gemspec_file, "w" do |gs|
       gs.write @gem.to_ruby
     end
 
@@ -230,10 +513,202 @@ class TestGemCommandsBuildCommand < Gem::TestCase
     assert_equal "this is a summary", spec.summary
   end
 
-  def test_can_find_gemspecs_without_dot_gemspec
-    gemspec_file = File.join(@tempdir, @gem.spec_name)
+  def test_execute_outside_dir_with_glob_argument
+    gemspec_dir = File.join @tempdir, "build_command_gem"
+    gemspec_file = File.join gemspec_dir, @gem.spec_name
+    readme_file = File.join gemspec_dir, "README.md"
 
-    File.open gemspec_file + ".gemspec", 'w' do |gs|
+    FileUtils.mkdir_p gemspec_dir
+
+    File.open readme_file, "w" do |f|
+      f.write "My awesome gem"
+    end
+
+    File.open gemspec_file, "w" do |gs|
+      gs.write @gem.to_ruby
+    end
+
+    @cmd.options[:build_path] = gemspec_dir
+    @cmd.options[:args] = ["*.gemspec"]
+
+    use_ui @ui do
+      @cmd.execute
+    end
+
+    output = @ui.output.split "\n"
+    assert_equal "  Successfully built RubyGem", output.shift
+    assert_equal "  Name: some_gem", output.shift
+    assert_equal "  Version: 2", output.shift
+    assert_equal "  File: some_gem-2.gem", output.shift
+    assert_equal [], output
+
+    gem_file = File.join gemspec_dir, File.basename(@gem.cache_file)
+    assert File.exist?(gem_file)
+
+    spec = Gem::Package.new(gem_file).spec
+
+    assert_equal "some_gem", spec.name
+    assert_equal "this is a summary", spec.summary
+  end
+
+  def test_execute_outside_dir_no_gemspec_present
+    gemspec_dir = File.join @tempdir, "build_command_gem"
+    gemspec_file = File.join @tempdir, @gem.spec_name
+    readme_file = File.join gemspec_dir, "README.md"
+
+    FileUtils.mkdir_p gemspec_dir
+
+    File.open readme_file, "w" do |f|
+      f.write "My awesome gem"
+    end
+
+    File.open gemspec_file, "w" do |gs|
+      gs.write @gem.to_ruby
+    end
+
+    @cmd.options[:build_path] = gemspec_dir
+    @cmd.options[:args] = ["*.gemspec"]
+
+    use_ui @ui do
+      assert_raise Gem::MockGemUi::TermError do
+        @cmd.execute
+      end
+    end
+
+    assert_equal "", @ui.output
+    assert_equal "ERROR:  Couldn't find a gemspec file matching '*.gemspec' in #{gemspec_dir}\n", @ui.error
+
+    gem_file = File.join gemspec_dir, File.basename(@gem.cache_file)
+    refute File.exist?(gem_file)
+  end
+
+  def test_execute_outside_dir_without_gem_name
+    gemspec_dir = File.join(@tempdir, "build_command_gem")
+    gemspec_file = File.join(gemspec_dir, @gem.spec_name)
+
+    readme_file = File.join gemspec_dir, "README.md"
+
+    FileUtils.mkdir_p(gemspec_dir)
+
+    File.open readme_file, "w" do |f|
+      f.write "My awesome gem"
+    end
+
+    File.open(gemspec_file, "w") do |gs|
+      gs.write(@gem.to_ruby)
+    end
+
+    @cmd.options[:build_path] = gemspec_dir
+    @cmd.options[:args] = []
+
+    use_ui @ui do
+      Dir.chdir(gemspec_dir) do
+        @cmd.execute
+      end
+    end
+
+    output = @ui.output.split("\n")
+    assert_equal "  Successfully built RubyGem", output.shift
+    assert_equal "  Name: some_gem", output.shift
+    assert_equal "  Version: 2", output.shift
+    assert_equal "  File: some_gem-2.gem", output.shift
+    assert_equal [], output
+
+    gem_file = File.join gemspec_dir, File.basename(@gem.cache_file)
+    assert File.exist?(gem_file)
+
+    spec = Gem::Package.new(gem_file).spec
+
+    assert_equal "some_gem", spec.name
+    assert_equal "this is a summary", spec.summary
+  end
+
+  def test_execute_outside_dir_with_external_gemspec
+    gemspec_dir = File.join @tempdir, "gemspec_dir"
+    gemspec_file = File.join gemspec_dir, @gem.spec_name
+
+    gemcode_dir = File.join @tempdir, "build_command_gem"
+    readme_file = File.join gemcode_dir, "README.md"
+
+    FileUtils.mkdir_p gemspec_dir
+    FileUtils.mkdir_p gemcode_dir
+
+    File.open readme_file, "w" do |f|
+      f.write "My awesome gem in nested directory"
+    end
+
+    File.open gemspec_file, "w" do |gs|
+      gs.write @gem.to_ruby
+    end
+
+    @cmd.options[:build_path] = gemcode_dir
+    @cmd.options[:args] = [gemspec_file]
+
+    use_ui @ui do
+      @cmd.execute
+    end
+
+    output = @ui.output.split "\n"
+    assert_equal "  Successfully built RubyGem", output.shift
+    assert_equal "  Name: some_gem", output.shift
+    assert_equal "  Version: 2", output.shift
+    assert_equal "  File: some_gem-2.gem", output.shift
+    assert_equal [], output
+
+    gem_file = File.join gemcode_dir, File.basename(@gem.cache_file)
+    assert File.exist?(gem_file)
+
+    spec = Gem::Package.new(gem_file).spec
+
+    assert_equal "some_gem", spec.name
+    assert_equal "this is a summary", spec.summary
+  end
+
+  def test_execute_outside_dir_with_external_relative_gemspec
+    gemspec_dir = File.join @tempdir, "gemspec_dir"
+    gemspec_file = File.join gemspec_dir, @gem.spec_name
+
+    gemcode_dir = File.join @tempdir, "build_command_gem"
+    readme_file = File.join gemcode_dir, "README.md"
+
+    FileUtils.mkdir_p gemspec_dir
+    FileUtils.mkdir_p gemcode_dir
+
+    File.open readme_file, "w" do |f|
+      f.write "My awesome gem in nested directory"
+    end
+
+    File.open gemspec_file, "w" do |gs|
+      gs.write @gem.to_ruby
+    end
+
+    @cmd.options[:build_path] = gemcode_dir
+    @cmd.options[:args] = [File.join("..", "gemspec_dir", @gem.spec_name)]
+
+    use_ui @ui do
+      @cmd.execute
+    end
+
+    output = @ui.output.split "\n"
+    assert_equal "  Successfully built RubyGem", output.shift
+    assert_equal "  Name: some_gem", output.shift
+    assert_equal "  Version: 2", output.shift
+    assert_equal "  File: some_gem-2.gem", output.shift
+    assert_equal [], output
+
+    gem_file = File.join gemcode_dir, File.basename(@gem.cache_file)
+    assert File.exist?(gem_file)
+
+    spec = Gem::Package.new(gem_file).spec
+
+    assert_equal "some_gem", spec.name
+    assert_equal "this is a summary", spec.summary
+  end
+
+  def test_can_find_gemspecs_without_dot_gemspec
+    gemspec_file = File.join(@tempdir, @gem.name)
+
+    File.open gemspec_file + ".gemspec", "w" do |gs|
       gs.write @gem.to_ruby
     end
 
@@ -293,7 +768,7 @@ class TestGemCommandsBuildCommand < Gem::TestCase
 
     use_ui @ui do
       Dir.chdir(gemspec_dir) do
-        assert_raises Gem::MockGemUi::TermError do
+        assert_raise Gem::MockGemUi::TermError do
           @cmd.execute
         end
       end
@@ -307,27 +782,46 @@ class TestGemCommandsBuildCommand < Gem::TestCase
     refute File.exist?(expected_gem)
   end
 
-  def util_test_build_gem(gem)
+  def util_test_build_gem(gem, suffix: nil)
     use_ui @ui do
       Dir.chdir @tempdir do
         @cmd.execute
       end
     end
-
+    suffix &&= "-#{suffix}"
+    gem_file = "some_gem-2#{suffix}.gem"
     output = @ui.output.split "\n"
     assert_equal "  Successfully built RubyGem", output.shift
     assert_equal "  Name: some_gem", output.shift
     assert_equal "  Version: 2", output.shift
-    assert_equal "  File: some_gem-2.gem", output.shift
+    assert_equal "  File: #{gem_file}", output.shift
     assert_equal [], output
 
-    gem_file = File.join(@tempdir, File.basename(gem.cache_file))
+    gem_file = File.join(@tempdir, gem_file)
     assert File.exist?(gem_file)
 
     spec = Gem::Package.new(gem_file).spec
 
     assert_equal "some_gem", spec.name
     assert_equal "this is a summary", spec.summary
+    spec
+  end
+
+  def util_test_build_gem_with_platform_option(platform, suffix:)
+    gemspec_file = File.join(@tempdir, @gem.spec_name)
+
+    File.open gemspec_file, "w" do |gs|
+      gs.write @gem.to_ruby
+    end
+
+    platforms = Gem.platforms.dup
+    begin
+      @cmd.handle_options [gemspec_file, "--platform", platform]
+
+      util_test_build_gem @gem, suffix: suffix
+    ensure
+      Gem.platforms = platforms
+    end
   end
 
   def test_execute_force
@@ -335,7 +829,7 @@ class TestGemCommandsBuildCommand < Gem::TestCase
 
     @gem.send :remove_instance_variable, :@rubygems_version
 
-    File.open gemspec_file, 'w' do |gs|
+    File.open gemspec_file, "w" do |gs|
       gs.write @gem.to_ruby
     end
 
@@ -346,18 +840,18 @@ class TestGemCommandsBuildCommand < Gem::TestCase
   end
 
   def test_build_signed_gem
-    skip 'openssl is missing' unless defined?(OpenSSL::SSL) && !java_platform?
+    pend "openssl is missing" unless Gem::HAVE_OPENSSL && !Gem.java_platform?
 
     trust_dir = Gem::Security.trust_dir
 
-    spec = util_spec 'some_gem' do |s|
-      s.signing_key = SIGNING_KEY
-      s.cert_chain = [CERT_FILE]
+    spec = util_spec "some_gem" do |s|
+      s.signing_key = RSA3072_PRIVATE_KEY_FILE
+      s.cert_chain = [RSA3072_PUBLIC_CERT_FILE]
     end
 
     gemspec_file = File.join(@tempdir, spec.spec_name)
 
-    File.open gemspec_file, 'w' do |gs|
+    File.open gemspec_file, "w" do |gs|
       gs.write spec.to_ruby
     end
 
@@ -365,15 +859,80 @@ class TestGemCommandsBuildCommand < Gem::TestCase
 
     util_test_build_gem spec
 
-    trust_dir.trust_cert OpenSSL::X509::Certificate.new(File.read(CERT_FILE))
+    trust_dir.trust_cert RSA3072_PUBLIC_CERT
 
     gem = Gem::Package.new(File.join(@tempdir, spec.file_name),
                            Gem::Security::HighSecurity)
     assert gem.verify
   end
 
+  def test_build_signed_gem_ml_dsa_65
+    pend "openssl is missing" unless Gem::HAVE_OPENSSL && !Gem.java_platform?
+
+    omit_unless_support_ml_dsa_key_load
+
+    trust_dir = Gem::Security.trust_dir
+
+    spec = util_spec "some_gem" do |s|
+      s.signing_key = ML_DSA_65_PRIVATE_KEY_FILE
+      s.cert_chain = [ML_DSA_65_PUBLIC_CERT_FILE]
+    end
+
+    gemspec_file = File.join(@tempdir, spec.spec_name)
+
+    File.open gemspec_file, "w" do |gs|
+      gs.write spec.to_ruby
+    end
+
+    @cmd.options[:args] = [gemspec_file]
+
+    util_test_build_gem spec
+
+    trust_dir.trust_cert(
+      OpenSSL::X509::Certificate.new(
+        File.read(ML_DSA_65_PUBLIC_CERT_FILE)
+      )
+    )
+
+    gem = Gem::Package.new(File.join(@tempdir, spec.file_name),
+                           Gem::Security::HighSecurity)
+    assert gem.verify
+  end
+
+  def test_build_signed_gem_ml_dsa_65_without_ml_dsa_support
+    pend "openssl is missing" unless Gem::HAVE_OPENSSL
+
+    omit_if_support_ml_dsa_key_load
+
+    spec = util_spec "some_gem" do |s|
+      s.signing_key = ML_DSA_65_PRIVATE_KEY_FILE
+      s.cert_chain = [ML_DSA_65_PUBLIC_CERT_FILE]
+    end
+
+    gemspec_file = File.join(@tempdir, spec.spec_name)
+
+    File.open gemspec_file, "w" do |gs|
+      gs.write spec.to_ruby
+    end
+
+    @cmd.options[:args] = [gemspec_file]
+
+    use_ui @ui do
+      Dir.chdir @tempdir do
+        e = assert_raise Gem::Security::Exception do
+          @cmd.execute
+        end
+
+        assert_match(
+          /^private key could not be loaded: .+ ML-DSA requires OpenSSL >= 3\.5/,
+          e.message
+        )
+      end
+    end
+  end
+
   def test_build_signed_gem_with_cert_expiration_length_days
-    skip 'openssl is missing' unless defined?(OpenSSL::SSL) && !java_platform?
+    pend "openssl is missing" unless Gem::HAVE_OPENSSL && !Gem.java_platform?
 
     gem_path = File.join Gem.user_home, ".gem"
     Dir.mkdir gem_path
@@ -386,14 +945,14 @@ class TestGemCommandsBuildCommand < Gem::TestCase
     tmp_private_key_file = File.join gem_path, "gem-private_key.pem"
     File.write(tmp_private_key_file, File.read(PRIVATE_KEY_FILE))
 
-    spec = util_spec 'some_gem' do |s|
+    spec = util_spec "some_gem" do |s|
       s.signing_key = tmp_private_key_file
       s.cert_chain  = [tmp_expired_cert_file]
     end
 
     gemspec_file = File.join(@tempdir, spec.spec_name)
 
-    File.open gemspec_file, 'w' do |gs|
+    File.open gemspec_file, "w" do |gs|
       gs.write spec.to_ruby
     end
 
@@ -417,7 +976,7 @@ class TestGemCommandsBuildCommand < Gem::TestCase
   end
 
   def test_build_auto_resign_cert
-    skip 'openssl is missing' unless defined?(OpenSSL::SSL) && !java_platform?
+    pend "openssl is missing" unless Gem::HAVE_OPENSSL && !Gem.java_platform?
 
     gem_path = File.join Gem.user_home, ".gem"
     Dir.mkdir gem_path
@@ -430,14 +989,14 @@ class TestGemCommandsBuildCommand < Gem::TestCase
     tmp_private_key_file = File.join gem_path, "gem-private_key.pem"
     File.write(tmp_private_key_file, File.read(PRIVATE_KEY_FILE))
 
-    spec = util_spec 'some_gem' do |s|
+    spec = util_spec "some_gem" do |s|
       s.signing_key = tmp_private_key_file
       s.cert_chain  = [tmp_expired_cert_file]
     end
 
     gemspec_file = File.join(@tempdir, spec.spec_name)
 
-    File.open gemspec_file, 'w' do |gs|
+    File.open gemspec_file, "w" do |gs|
       gs.write spec.to_ruby
     end
 
@@ -453,7 +1012,7 @@ class TestGemCommandsBuildCommand < Gem::TestCase
 
     output = @ui.output.split "\n"
     assert_equal "INFO:  Your certificate has expired, trying to re-sign it...", output.shift
-    assert_equal "INFO:  Your cert: #{tmp_expired_cert_file } has been auto re-signed with the key: #{tmp_private_key_file}", output.shift
+    assert_equal "INFO:  Your cert: #{tmp_expired_cert_file} has been auto re-signed with the key: #{tmp_private_key_file}", output.shift
     assert_match(/INFO:  Your expired cert will be located at: .+\Wgem-public_cert\.pem\.expired\.[0-9]+/, output.shift)
   end
 
@@ -488,5 +1047,4 @@ class TestGemCommandsBuildCommand < Gem::TestCase
   ensure
     ENV["SOURCE_DATE_EPOCH"] = epoch
   end
-
 end

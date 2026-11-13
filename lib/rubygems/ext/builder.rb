@@ -1,23 +1,18 @@
 # frozen_string_literal: true
+
 #--
 # Copyright 2006 by Chad Fowler, Rich Kilmer, Jim Weirich and others.
 # All rights reserved.
 # See LICENSE.txt for permissions.
 #++
 
-require 'rubygems/user_interaction'
+require_relative "../user_interaction"
 
 class Gem::Ext::Builder
-
   include Gem::UserInteraction
 
-  ##
-  # The builder shells-out to run various commands after changing the
-  # directory.  This means multiple installations cannot be allowed to build
-  # extensions in parallel as they may change each other's directories leading
-  # to broken extensions or failed installations.
-
-  CHDIR_MUTEX = Mutex.new # :nodoc:
+  class NoMakefileError < Gem::InstallError
+  end
 
   attr_accessor :build_args # :nodoc:
 
@@ -26,60 +21,119 @@ class Gem::Ext::Builder
     $1.downcase
   end
 
-  def self.make(dest_path, results)
-    unless File.exist? 'Makefile'
-      raise Gem::InstallError, 'Makefile not found'
+  def self.make(dest_path, results, make_dir = Dir.pwd, sitedir = nil, targets = ["clean", "", "install"],
+    target_rbconfig: Gem.target_rbconfig, n_jobs: nil)
+    unless File.exist? File.join(make_dir, "Makefile")
+      # No makefile exists, nothing to do.
+      raise NoMakefileError, "No Makefile found in #{make_dir}"
     end
 
     # try to find make program from Ruby configure arguments first
-    RbConfig::CONFIG['configure_args'] =~ /with-make-prog\=(\w+)/
-    make_program = ENV['MAKE'] || ENV['make'] || $1
-    unless make_program
-      make_program = (/mswin/ =~ RUBY_PLATFORM) ? 'nmake' : 'make'
+    target_rbconfig["configure_args"] =~ /with-make-prog\=(\w+)/
+    make_program_name = ENV["MAKE"] || ENV["make"] || $1
+    make_program_name ||= mswin? ? "nmake" : "make"
+    make_program = shellsplit_command(make_program_name)
+
+    is_nmake = /\bnmake/i.match?(make_program_name)
+    # mkmf on mswin moves the drive letter of prefix to DESTDIR, which an empty DESTDIR would drop.
+    destdir = !mswin? || ENV["DESTDIR"] && ENV["DESTDIR"] != "" ? format("DESTDIR=%s", ENV["DESTDIR"]) : ""
+
+    # nmake doesn't support parallel build
+    unless is_nmake
+      have_make_arguments = make_program.size > 1
+      n_jobs ||= 0
+
+      if !have_make_arguments && n_jobs > 1 && !ENV["MAKEFLAGS"]&.match(/-j\d*(\s|\Z)/)
+        make_program << "-j#{n_jobs}"
+      end
     end
 
-    destdir = '"DESTDIR=%s"' % ENV['DESTDIR']
+    env = [destdir]
 
-    ['clean', '', 'install'].each do |target|
+    if sitedir
+      env << format("sitearchdir=%s", sitedir)
+      env << format("sitelibdir=%s", sitedir)
+    end
+
+    targets.each do |target|
       # Pass DESTDIR via command line to override what's in MAKEFLAGS
       cmd = [
-        make_program,
-        destdir,
-        target
-      ].join(' ').rstrip
+        *make_program,
+        *env,
+        target,
+      ].reject(&:empty?)
       begin
-        run(cmd, results, "make #{target}".rstrip)
+        run(cmd, results, "make #{target}".rstrip, make_dir)
       rescue Gem::InstallError
-        raise unless target == 'clean' # ignore clean failure
+        raise unless target == "clean" # ignore clean failure
       end
     end
   end
 
-  def self.run(command, results, command_name = nil)
+  def self.mswin? # :nodoc:
+    RUBY_PLATFORM.include?("mswin")
+  end
+
+  def self.ruby
+    # Gem.ruby is quoted if it contains whitespace
+    cmd = shellsplit(Gem.ruby)
+
+    # This load_path is only needed when running rubygems test without a proper installation.
+    # Prepending it in a normal installation will cause problem with order of $LOAD_PATH.
+    # Therefore only add load_path if it is not present in the default $LOAD_PATH.
+    load_path = File.expand_path("../..", __dir__)
+    case load_path
+    when RbConfig::CONFIG["sitelibdir"], RbConfig::CONFIG["vendorlibdir"], RbConfig::CONFIG["rubylibdir"]
+      cmd
+    else
+      cmd << "-I#{load_path}"
+    end
+  end
+
+  def self.run(command, results, command_name = nil, dir = Dir.pwd, env = {})
     verbose = Gem.configuration.really_verbose
 
     begin
-      rubygems_gemdeps, ENV['RUBYGEMS_GEMDEPS'] = ENV['RUBYGEMS_GEMDEPS'], nil
+      rubygems_gemdeps = ENV["RUBYGEMS_GEMDEPS"]
+      ENV["RUBYGEMS_GEMDEPS"] = nil
       if verbose
-        puts("current directory: #{Dir.pwd}")
+        puts("current directory: #{dir}")
         p(command)
       end
-      results << "current directory: #{Dir.pwd}"
-      results << (command.respond_to?(:shelljoin) ? command.shelljoin : command)
+      results << "current directory: #{dir}"
+      results << shelljoin(command)
 
       require "open3"
       # Set $SOURCE_DATE_EPOCH for the subprocess.
-      env = {'SOURCE_DATE_EPOCH' => Gem.source_date_epoch_string}
-      output, status = Open3.capture2e(env, *command)
-      if verbose
-        puts output
-      else
+      # Under Ruby::Box defined?($gvar) does not see assignments made inside the
+      # box, so mkmf have_devel? never memoizes and recurses until SystemStackError
+      # (https://bugs.ruby-lang.org/issues/22283).
+      # Drop $RUBY_BOX last so no caller can restore it.
+      build_env = { "SOURCE_DATE_EPOCH" => Gem.source_date_epoch_string }.merge(env).merge("RUBY_BOX" => nil)
+      # A single-element command would be parsed as a shell command line,
+      # splitting an unquoted command path containing spaces. Use the
+      # [cmdname, argv0] form to keep exec semantics.
+      command = [[command.first, command.first]] if command.size == 1
+      output, status = begin
+                         Open3.popen2e(build_env, *command, chdir: dir) do |stdin, stdouterr, wait_thread|
+                           stdin.close
+                           output = String.new
+                           while line = stdouterr.gets
+                             output << line
+                             if verbose
+                               print line
+                             end
+                           end
+                           [output, wait_thread.value]
+                         end
+                       rescue StandardError => error
+                         raise Gem::InstallError, "#{command_name || class_name} failed#{error.message}"
+                       end
+      unless verbose
         results << output
       end
-    rescue => error
-      raise Gem::InstallError, "#{command_name || class_name} failed#{error.message}"
     ensure
-      ENV['RUBYGEMS_GEMDEPS'] = rubygems_gemdeps
+      ENV["RUBYGEMS_GEMDEPS"] = rubygems_gemdeps
     end
 
     unless status.success?
@@ -100,17 +154,44 @@ class Gem::Ext::Builder
     end
   end
 
+  def self.shellsplit(command)
+    require "shellwords"
+
+    Shellwords.split(command)
+  end
+
+  ##
+  # Splits a command string such as <tt>ENV["MAKE"]</tt> into an argument list.
+  #
+  # On Windows, a value that names an existing file, such as
+  # <tt>C:\path\nmake.exe</tt>, is taken as a single word because POSIX
+  # shell splitting would consume the backslashes as escape characters.
+  # Any other value is split like a POSIX shell command line, where a
+  # path containing spaces must be quoted.
+
+  def self.shellsplit_command(command)
+    return [command] if Gem.win_platform? && File.file?(command)
+
+    shellsplit(command)
+  end
+
+  def self.shelljoin(command)
+    require "shellwords"
+
+    Shellwords.join(command)
+  end
+
   ##
   # Creates a new extension builder for +spec+.  If the +spec+ does not yet
   # have build arguments, saved, set +build_args+ which is an ARGV-style
   # array.
 
-  def initialize(spec, build_args = spec.build_args)
+  def initialize(spec, build_args = spec.build_args, target_rbconfig = Gem.target_rbconfig, build_jobs = nil)
     @spec       = spec
     @build_args = build_args
     @gem_dir    = spec.full_gem_path
-
-    @ran_rake = false
+    @target_rbconfig = target_rbconfig
+    @build_jobs = build_jobs
   end
 
   ##
@@ -123,12 +204,14 @@ class Gem::Ext::Builder
     when /configure/ then
       Gem::Ext::ConfigureBuilder
     when /rakefile/i, /mkrf_conf/i then
-      @ran_rake = true
       Gem::Ext::RakeBuilder
     when /CMakeLists.txt/ then
-      Gem::Ext::CmakeBuilder
+      Gem::Ext::CmakeBuilder.new
+    when /Cargo.toml/ then
+      Gem::Ext::CargoBuilder.new
     else
-      build_error("No builder for extension '#{extension}'")
+      # Also called to validate a specification, which must not leave a build log.
+      raise Gem::Ext::BuildError, "No builder for extension '#{extension}'"
     end
   end
 
@@ -144,8 +227,10 @@ ERROR: Failed to build gem native extension.
     #{output}
 
 Gem files will remain installed in #{@gem_dir} for inspection.
-Results logged to #{gem_make_out}
 EOF
+
+    # Losing the log must not cost the user the build error itself.
+    message += "Results logged to #{gem_make_out}\n" if gem_make_out
 
     raise Gem::Ext::BuildError, message, backtrace
   end
@@ -153,7 +238,11 @@ EOF
   def build_extension(extension, dest_path) # :nodoc:
     results = []
 
-    builder = builder_for(extension)
+    begin
+      builder = builder_for(extension)
+    rescue Gem::Ext::BuildError => e
+      build_error(e.message)
+    end
 
     extension_dir =
       File.expand_path File.join(@gem_dir, File.dirname(extension))
@@ -162,28 +251,75 @@ EOF
     begin
       FileUtils.mkdir_p dest_path
 
-      CHDIR_MUTEX.synchronize do
-        pwd = Dir.getwd
-        Dir.chdir extension_dir
-        begin
-          results = builder.build(extension, dest_path,
-                                  results, @build_args, lib_dir)
+      results = builder.build(extension, dest_path,
+                              results, @build_args, lib_dir, extension_dir, @target_rbconfig, n_jobs: @build_jobs)
 
-          verbose { results.join("\n") }
-        ensure
-          begin
-            Dir.chdir pwd
-          rescue SystemCallError
-            Dir.chdir dest_path
-          end
-        end
+      verbose { results.join("\n") }
+
+      # Build logs are noisy, non-reproducible artifacts that are not meant to
+      # be installed. Drop the ones this build left behind, plus any written
+      # into the extension directory by a RubyGems old enough to put them there.
+      FileUtils.rm_f mkmf_log_candidates(extension_dir, dest_path)
+      FileUtils.rm_f File.join(dest_path, "gem_make.out")
+      FileUtils.rm_f [build_log_path("mkmf.log"), build_log_path("gem_make.out")]
+    rescue Gem::Ext::Builder::NoMakefileError => e
+      # extconf ran fine but produced no Makefile, so the extension was skipped
+      # rather than built and installing carries on. Keep the log that says why
+      # it was skipped, out of the installation tree but still reachable.
+      results << e.message
+      results << "Skipping make for #{extension} as no Makefile was found."
+
+      verbose { results.join("\n") }
+
+      preserve_mkmf_log extension_dir, dest_path
+      write_gem_make_out results.join("\n")
+    rescue StandardError => e
+      results << e.message
+
+      mkmf_log_dest = preserve_mkmf_log(extension_dir, dest_path)
+      if mkmf_log_dest
+        results << "To see why this extension failed to compile, please check the mkmf.log which can be found here:"
+        results << "  #{mkmf_log_dest}"
       end
 
-      write_gem_make_out results.join "\n"
-    rescue => e
-      results << e.message
       build_error(results.join("\n"), $@)
     end
+  end
+
+  ##
+  # Where a build log of +kind+ for this gem lives in the build_info directory.
+
+  def build_log_path(kind) # :nodoc:
+    File.join @spec.build_info_dir, "#{@spec.full_name}.#{kind}"
+  end
+
+  ##
+  # Moves the mkmf.log this build left behind into the build_info directory and
+  # returns its new path, or nil when there is none or it cannot be kept.
+  # Keeping a log must never replace the build error the caller is reporting,
+  # so a filesystem failure here is swallowed.
+
+  def preserve_mkmf_log(extension_dir, dest_path) # :nodoc:
+    mkmf_log = mkmf_log_candidates(extension_dir, dest_path).find {|log| File.exist?(log) }
+    return unless mkmf_log
+
+    destination = build_log_path "mkmf.log"
+
+    FileUtils.mkdir_p @spec.build_info_dir
+    FileUtils.mv mkmf_log, destination
+
+    destination
+  rescue SystemCallError
+    nil
+  end
+
+  ##
+  # Places a completed build may have left an mkmf.log, most specific first.
+  # Gem::Ext::ExtConfBuilder parks it in +dest_path+ so that the "clean" target
+  # cannot delete it; the other builders leave it where extconf ran.
+
+  def mkmf_log_candidates(extension_dir, dest_path) # :nodoc:
+    [File.join(dest_path, "mkmf.log"), File.join(extension_dir, "mkmf.log")]
   end
 
   ##
@@ -196,17 +332,16 @@ EOF
     if @build_args.empty?
       say "Building native extensions. This could take a while..."
     else
-      say "Building native extensions with: '#{@build_args.join ' '}'"
+      say "Building native extensions with: '#{@build_args.join " "}'"
       say "This could take a while..."
     end
 
     dest_path = @spec.extension_dir
 
+    require "fileutils"
     FileUtils.rm_f @spec.gem_build_complete_path
 
     @spec.extensions.each do |extension|
-      break if @ran_rake
-
       build_extension extension, dest_path
     end
 
@@ -214,18 +349,21 @@ EOF
   end
 
   ##
-  # Writes +output+ to gem_make.out in the extension install directory.
+  # Writes +output+ to gem_make.out in the build_info directory and returns its
+  # path, or nil when it cannot be written. Only called when the extension was
+  # not built, to keep build logs out of the installation tree.
 
   def write_gem_make_out(output) # :nodoc:
-    destination = File.join @spec.extension_dir, 'gem_make.out'
+    destination = build_log_path "gem_make.out"
 
-    FileUtils.mkdir_p @spec.extension_dir
+    FileUtils.mkdir_p @spec.build_info_dir
 
-    File.open destination, 'wb' do |io|
+    File.open destination, "wb" do |io|
       io.puts output
     end
 
     destination
+  rescue SystemCallError
+    nil
   end
-
 end

@@ -1,11 +1,11 @@
 # frozen_string_literal: true
+
 ##
 # Basic OpenSSL-based package signing class.
 
-require "rubygems/user_interaction"
+require_relative "../user_interaction"
 
 class Gem::Security::Signer
-
   include Gem::UserInteraction
 
   ##
@@ -35,7 +35,7 @@ class Gem::Security::Signer
   attr_reader :options
 
   DEFAULT_OPTIONS = {
-    expiration_length_days: 365
+    expiration_length_days: 365,
   }.freeze
 
   ##
@@ -43,19 +43,19 @@ class Gem::Security::Signer
   def self.re_sign_cert(expired_cert, expired_cert_path, private_key)
     return unless expired_cert.not_after < Time.now
 
-    expiry = expired_cert.not_after.strftime('%Y%m%d%H%M%S')
+    expiry = expired_cert.not_after.strftime("%Y%m%d%H%M%S")
     expired_cert_file = "#{File.basename(expired_cert_path)}.expired.#{expiry}"
     new_expired_cert_path = File.join(Gem.user_home, ".gem", expired_cert_file)
 
-    Gem::Security.write(expired_cert, new_expired_cert_path)
+    Gem::Security.write_certificate(expired_cert, new_expired_cert_path)
 
     re_signed_cert = Gem::Security.re_sign(
       expired_cert,
       private_key,
-      (Gem::Security::ONE_DAY * Gem.configuration.cert_expiration_length_days)
+      Gem::Security::ONE_DAY * Gem.configuration.cert_expiration_length_days
     )
 
-    Gem::Security.write(re_signed_cert, expired_cert_path)
+    Gem::Security.write_certificate(re_signed_cert, expired_cert_path)
 
     yield(expired_cert_path, new_expired_cert_path) if block_given?
   end
@@ -81,11 +81,18 @@ class Gem::Security::Signer
       @cert_chain = [default_cert] if File.exist? default_cert
     end
 
-    @digest_algorithm = Gem::Security::DIGEST_ALGORITHM
     @digest_name      = Gem::Security::DIGEST_NAME
+    @digest_algorithm = Gem::Security.create_digest(@digest_name)
 
-    if @key && !@key.is_a?(OpenSSL::PKey::RSA)
-      @key = OpenSSL::PKey::RSA.new(File.read(@key), @passphrase)
+    if @key && !@key.is_a?(OpenSSL::PKey::PKey)
+      begin
+        @key = OpenSSL::PKey.read(File.read(@key), @passphrase)
+      rescue OpenSSL::PKey::PKeyError
+        raise Gem::Security::Exception,
+          "private key could not be loaded: The key may use an algorithm "\
+          "such as ML-DSA that the installed OpenSSL does not support. "\
+          "ML-DSA requires OpenSSL >= 3.5 or an SSL library supporting ML-DSA."
+      end
     end
 
     if @cert_chain
@@ -106,12 +113,10 @@ class Gem::Security::Signer
   # this value is preferred, otherwise the subject is used.
 
   def extract_name(cert) # :nodoc:
-    subject_alt_name = cert.extensions.find { |e| 'subjectAltName' == e.oid }
+    subject_alt_name = cert.extensions.find {|e| e.oid == "subjectAltName" }
 
     if subject_alt_name
-      /\Aemail:/ =~ subject_alt_name.value
-
-      $' || subject_alt_name.value
+      subject_alt_name.value.delete_prefix("email:")
     else
       cert.subject
     end
@@ -140,9 +145,9 @@ class Gem::Security::Signer
   def sign(data)
     return unless @key
 
-    raise Gem::Security::Exception, 'no certs provided' if @cert_chain.empty?
+    raise Gem::Security::Exception, "no certs provided" if @cert_chain.empty?
 
-    if @cert_chain.length == 1 and @cert_chain.last.not_after < Time.now
+    if @cert_chain.length == 1 && @cert_chain.last.not_after < Time.now
       alert("Your certificate has expired, trying to re-sign it...")
 
       re_sign_key(
@@ -154,7 +159,8 @@ class Gem::Security::Signer
 
     Gem::Security::SigningPolicy.verify @cert_chain, @key, {}, {}, full_name
 
-    @key.sign @digest_algorithm.new, data
+    digest = @digest_algorithm.new if Gem::Security.digest_required?(@key)
+    @key.sign digest, data
   end
 
   ##
@@ -175,25 +181,32 @@ class Gem::Security::Signer
     old_cert = @cert_chain.last
 
     disk_cert_path = File.join(Gem.default_cert_path)
-    disk_cert = File.read(disk_cert_path) rescue nil
+    disk_cert = begin
+                  File.read(disk_cert_path)
+                rescue StandardError
+                  nil
+                end
 
     disk_key_path = File.join(Gem.default_key_path)
-    disk_key =
-      OpenSSL::PKey::RSA.new(File.read(disk_key_path), @passphrase) rescue nil
+    disk_key = begin
+                 OpenSSL::PKey.read(File.read(disk_key_path), @passphrase)
+               rescue StandardError
+                 nil
+               end
 
     return unless disk_key
 
-    if disk_key.to_pem == @key.to_pem && disk_cert == old_cert.to_pem
-      expiry = old_cert.not_after.strftime('%Y%m%d%H%M%S')
+    if disk_key.private_to_pem == @key.private_to_pem && disk_cert == old_cert.to_pem
+      expiry = old_cert.not_after.strftime("%Y%m%d%H%M%S")
       old_cert_file = "gem-public_cert.pem.expired.#{expiry}"
       old_cert_path = File.join(Gem.user_home, ".gem", old_cert_file)
 
       unless File.exist?(old_cert_path)
-        Gem::Security.write(old_cert, old_cert_path)
+        Gem::Security.write_certificate(old_cert, old_cert_path)
 
         cert = Gem::Security.re_sign(old_cert, @key, expiration_length)
 
-        Gem::Security.write(cert, disk_cert_path)
+        Gem::Security.write_certificate(cert, disk_cert_path)
 
         alert("Your cert: #{disk_cert_path} has been auto re-signed with the key: #{disk_key_path}")
         alert("Your expired cert will be located at: #{old_cert_path}")
@@ -202,5 +215,4 @@ class Gem::Security::Signer
       end
     end
   end
-
 end

@@ -1,49 +1,42 @@
 # frozen_string_literal: true
-require 'rubygems'
-require 'rubygems/request'
-require 'rubygems/request/connection_pools'
-require 'rubygems/s3_uri_signer'
-require 'rubygems/uri_formatter'
-require 'rubygems/uri_parsing'
-require 'rubygems/user_interaction'
-require 'resolv'
+
+require_relative "../rubygems"
+require_relative "request"
+require_relative "request/connection_pools"
+require_relative "s3_uri_signer"
+require_relative "uri_formatter"
+require_relative "uri"
+require_relative "user_interaction"
 
 ##
 # RemoteFetcher handles the details of fetching gems and gem information from
 # a remote source.
 
 class Gem::RemoteFetcher
-
   include Gem::UserInteraction
-  include Gem::UriParsing
 
   ##
   # A FetchError exception wraps up the various possible IO and HTTP failures
   # that could happen while downloading from the internet.
 
   class FetchError < Gem::Exception
-
-    include Gem::UriParsing
-
     ##
     # The URI which was being accessed when the exception happened.
 
-    attr_accessor :uri
+    attr_accessor :uri, :original_uri
 
     def initialize(message, uri)
-      super message
+      uri = Gem::Uri.new(uri)
 
-      uri = parse_uri(uri)
+      super uri.redact_credentials_from(message)
 
-      uri.password = 'REDACTED' if uri.respond_to?(:password) && uri.password
-
-      @uri = uri.to_s
+      @original_uri = uri.to_s
+      @uri = uri.redacted.to_s
     end
 
     def to_s # :nodoc:
       "#{super} (#{uri})"
     end
-
   end
 
   ##
@@ -52,6 +45,11 @@ class Gem::RemoteFetcher
 
   class UnknownHostError < FetchError
   end
+  deprecate_constant(:UnknownHostError)
+
+  # Schemes fetched over the network, as opposed to copied from a local path.
+  REMOTE_SCHEMES = %w[http https s3].freeze
+  private_constant :REMOTE_SCHEMES
 
   @fetcher = nil
 
@@ -59,7 +57,7 @@ class Gem::RemoteFetcher
   # Cached RemoteFetcher instance.
 
   def self.fetcher
-    @fetcher ||= self.new Gem.configuration[:http_proxy]
+    @fetcher ||= new Gem.configuration[:http_proxy]
   end
 
   attr_accessor :headers
@@ -78,17 +76,17 @@ class Gem::RemoteFetcher
   # +headers+: A set of additional HTTP headers to be sent to the server when
   #            fetching the gem.
 
-  def initialize(proxy=nil, dns=nil, headers={})
-    require 'net/http'
-    require 'stringio'
-    require 'time'
-    require 'uri'
+  def initialize(proxy = nil, dns = nil, headers = {})
+    require_relative "core_ext/tcpsocket_init" if Gem.configuration.ipv4_fallback_enabled
+    require_relative "vendored_net_http"
+    require_relative "vendor/uri/lib/uri"
 
     Socket.do_not_reverse_lookup = true
 
     @proxy = proxy
     @pools = {}
-    @pool_lock = Mutex.new
+    @pool_lock = Thread::Mutex.new
+    @pool_size = 1
     @cert_files = Gem::Request.get_cert_files
 
     @headers = headers
@@ -106,7 +104,7 @@ class Gem::RemoteFetcher
 
     return if found.empty?
 
-    spec, source = found.max_by { |(s,_)| s.version }
+    spec, source = found.max_by {|(s,_)| s.version }
 
     download spec, source.uri
   end
@@ -117,75 +115,89 @@ class Gem::RemoteFetcher
   # always replaced.
 
   def download(spec, source_uri, install_dir = Gem.dir)
+    gem_file_name = File.basename spec.cache_file
+
+    source_uri = Gem::Uri.new(source_uri)
+
+    scheme = source_uri.scheme
+
+    # Gem::URI.parse gets confused by MS Windows paths with forward slashes.
+    scheme = nil if /^[a-z]$/i.match?(scheme)
+
+    remote_source = REMOTE_SCHEMES.include?(scheme)
+
+    install_cache_dir = File.join install_dir, "cache"
     cache_dir =
-      if Dir.pwd == install_dir # see fetch_command
+      if File.identical?(".", install_dir) # gem fetch asks for it this way
         install_dir
-      elsif File.writable? install_dir
-        File.join install_dir, "cache"
+      elsif Gem.configuration.global_gem_cache && remote_source && ensure_writable_cache_dir(Gem.global_gem_cache_path)
+        Gem.global_gem_cache_path
+      elsif File.writable?(install_cache_dir) || (File.writable?(install_dir) && !File.exist?(install_cache_dir))
+        install_cache_dir
       else
         File.join Gem.user_dir, "cache"
       end
 
-    gem_file_name = File.basename spec.cache_file
     local_gem_path = File.join cache_dir, gem_file_name
 
-    FileUtils.mkdir_p cache_dir rescue nil unless File.exist? cache_dir
-
-    source_uri = parse_uri(source_uri)
-
-    scheme = source_uri.scheme
-
-    # URI.parse gets confused by MS Windows paths with forward slashes.
-    scheme = nil if scheme =~ /^[a-z]$/i
+    require "fileutils"
+    begin
+      FileUtils.mkdir_p cache_dir
+    rescue StandardError
+      nil
+    end unless File.exist? cache_dir
 
     # REFACTOR: split this up and dispatch on scheme (eg download_http)
     # REFACTOR: be sure to clean up fake fetcher when you do this... cleaner
     case scheme
-    when 'http', 'https', 's3' then
-      unless File.exist? local_gem_path
+    when *REMOTE_SCHEMES then
+      if File.exist? local_gem_path
+        verbose "Using local gem #{local_gem_path}"
+      else
         begin
-          verbose "Downloading gem #{gem_file_name}"
+          verbose "Downloading gem #{gem_file_name} to #{cache_dir}"
 
           remote_gem_path = source_uri + "gems/#{gem_file_name}"
 
-          self.cache_update_path remote_gem_path, local_gem_path
+          cache_update_path remote_gem_path, local_gem_path
         rescue FetchError
-          raise if spec.original_platform == spec.platform
+          raise if Gem::ContentAddress.content_addressed?(spec, validate_ruby_abi: false)
+          raise if spec.original_platform.to_s == spec.platform.to_s
 
           alternate_name = "#{spec.original_name}.gem"
 
-          verbose "Failed, downloading gem #{alternate_name}"
+          verbose "Failed, downloading gem #{alternate_name} to #{cache_dir}"
 
           remote_gem_path = source_uri + "gems/#{alternate_name}"
 
-          self.cache_update_path remote_gem_path, local_gem_path
+          cache_update_path remote_gem_path, local_gem_path
         end
       end
-    when 'file' then
+    when "file" then
       begin
         path = source_uri.path
-        path = File.dirname(path) if File.extname(path) == '.gem'
+        path = File.dirname(path) if File.extname(path) == ".gem"
 
-        remote_gem_path = Gem::Util.correct_for_windows_path(File.join(path, 'gems', gem_file_name))
+        remote_gem_path = Gem::Util.correct_for_windows_path(File.join(path, "gems", gem_file_name))
 
-        FileUtils.cp(remote_gem_path, local_gem_path)
+        atomic_copy(remote_gem_path, local_gem_path)
       rescue Errno::EACCES
         local_gem_path = source_uri.to_s
       end
 
       verbose "Using local gem #{local_gem_path}"
-    when nil then # TODO test for local overriding cache
+    when nil then
       source_path = if Gem.win_platform? && source_uri.scheme &&
-                       !source_uri.path.include?(':')
-                      "#{source_uri.scheme}:#{source_uri.path}"
-                    else
-                      source_uri.path
-                    end
+                       !source_uri.path.include?(":")
+        "#{source_uri.scheme}:#{source_uri.path}"
+      else
+        source_uri.path
+      end
 
       source_path = Gem::UriFormatter.new(source_path).unescape
 
       begin
-        FileUtils.cp source_path, local_gem_path unless
+        atomic_copy(source_path, local_gem_path) unless
           File.identical?(source_path, local_gem_path)
       rescue Errno::EACCES
         local_gem_path = source_uri.to_s
@@ -209,50 +221,61 @@ class Gem::RemoteFetcher
   ##
   # HTTP Fetcher. Dispatched by +fetch_path+. Use it instead.
 
-  def fetch_http(uri, last_modified = nil, head = false, depth = 0)
-    fetch_type = head ? Net::HTTP::Head : Net::HTTP::Get
+  def fetch_http(uri, last_modified = nil, head = false, depth = 0, headers = self.headers)
+    fetch_type = head ? Gem::Net::HTTP::Head : Gem::Net::HTTP::Get
     response   = request uri, fetch_type, last_modified do |req|
-      headers.each { |k,v| req.add_field(k,v) }
+      headers.each {|k,v| req.add_field(k,v) }
     end
 
     case response
-    when Net::HTTPOK, Net::HTTPNotModified then
-      response.uri = uri if response.respond_to? :uri
+    when Gem::Net::HTTPOK, Gem::Net::HTTPNotModified then
+      response.uri = uri
       head ? response : response.body
-    when Net::HTTPMovedPermanently, Net::HTTPFound, Net::HTTPSeeOther,
-         Net::HTTPTemporaryRedirect then
-      raise FetchError.new('too many redirects', uri) if depth > 10
+    when Gem::Net::HTTPMovedPermanently, Gem::Net::HTTPFound, Gem::Net::HTTPSeeOther,
+         Gem::Net::HTTPTemporaryRedirect, Gem::Net::HTTPPermanentRedirect then
+      raise FetchError.new("too many redirects", uri) if depth > 10
 
-      unless location = response['Location']
+      unless location = response["Location"]
         raise FetchError.new("redirecting but no redirect location was given", uri)
       end
-      location = parse_uri location
+      location = uri + location
 
       if https?(uri) && !https?(location)
-        raise FetchError.new("redirecting to non-https resource: #{location}", uri)
+        raise FetchError.new("redirecting to non-https resource: #{Gem::Uri.redact(location)}", uri)
       end
+      # see Gem::CompactIndexClient::HTTPFetcher#fetch
+      same_origin = [location.scheme, location.host, location.port] == [uri.scheme, uri.host, uri.port]
+      location.userinfo = uri.userinfo if same_origin && !location.userinfo
+      # X-Gemfile-Source carries the source URI that Bundler mirrors,
+      # credentials included, and is meant for the mirror's origin only.
+      headers = headers.except("X-Gemfile-Source") unless same_origin
 
-      fetch_http(location, last_modified, head, depth + 1)
+      fetch_http(location, last_modified, head, depth + 1, headers)
     else
-      raise FetchError.new("bad response #{response.message} #{response.code}", uri)
+      custom_error = response["X-Error-Message"]
+      error_detail = clean_text(custom_error || response.message)
+      raise FetchError.new("Bad response #{error_detail} #{response.code}", uri)
     end
   end
 
-  alias :fetch_https :fetch_http
+  alias_method :fetch_https, :fetch_http
 
   ##
   # Downloads +uri+ and returns it as a String.
 
   def fetch_path(uri, mtime = nil, head = false)
-    uri = parse_uri uri
+    uri = Gem::Uri.new uri
 
-    unless uri.scheme
-      raise ArgumentError, "uri scheme is invalid: #{uri.scheme.inspect}"
-    end
+    method = {
+      "http" => "fetch_http",
+      "https" => "fetch_http",
+      "s3" => "fetch_s3",
+      "file" => "fetch_file",
+    }.fetch(uri.scheme) { raise ArgumentError, "uri scheme is invalid: #{uri.scheme.inspect}" }
 
-    data = send "fetch_#{uri.scheme}", uri, mtime, head
+    data = send method, uri, mtime, head
 
-    if data and !head and uri.to_s =~ /\.gz$/
+    if data && !head && uri.to_s.end_with?(".gz")
       begin
         data = Gem::Util.gunzip data
       rescue Zlib::GzipFile::Error
@@ -261,20 +284,14 @@ class Gem::RemoteFetcher
     end
 
     data
-  rescue Timeout::Error
-    raise UnknownHostError.new('timed out', uri)
-  rescue IOError, SocketError, SystemCallError,
-         *(OpenSSL::SSL::SSLError if defined?(OpenSSL)) => e
-    if e.message =~ /getaddrinfo/
-      raise UnknownHostError.new('no such name', uri)
-    else
-      raise FetchError.new("#{e.class}: #{e}", uri)
-    end
+  rescue Gem::Timeout::Error, IOError, SocketError, SystemCallError,
+         *(OpenSSL::SSL::SSLError if Gem::HAVE_OPENSSL) => e
+    raise FetchError.new("#{e.class}: #{e}", uri)
   end
 
   def fetch_s3(uri, mtime = nil, head = false)
     begin
-      public_uri = s3_uri_signer(uri).sign
+      public_uri = s3_uri_signer(uri, head ? "HEAD" : "GET").sign
     rescue Gem::S3URISigner::ConfigurationError, Gem::S3URISigner::InstanceProfileError => e
       raise FetchError.new(e.message, "s3://#{uri.host}")
     end
@@ -282,8 +299,8 @@ class Gem::RemoteFetcher
   end
 
   # we have our own signing code here to avoid a dependency on the aws-sdk gem
-  def s3_uri_signer(uri)
-    Gem::S3URISigner.new(uri)
+  def s3_uri_signer(uri, method)
+    Gem::S3URISigner.new(uri, method)
   end
 
   ##
@@ -291,15 +308,19 @@ class Gem::RemoteFetcher
   # passes the data.
 
   def cache_update_path(uri, path = nil, update = true)
-    mtime = path && File.stat(path).mtime rescue nil
+    mtime = begin
+              path && File.stat(path).mtime
+            rescue StandardError
+              nil
+            end
 
     data = fetch_path(uri, mtime)
 
-    if data == nil # indicates the server returned 304 Not Modified
+    if data.nil? # indicates the server returned 304 Not Modified
       return Gem.read_binary(path)
     end
 
-    if update and path
+    if update && path
       Gem.write_binary(path, data)
     end
 
@@ -307,8 +328,8 @@ class Gem::RemoteFetcher
   end
 
   ##
-  # Performs a Net::HTTP request of type +request_class+ on +uri+ returning
-  # a Net::HTTP response object.  request maintains a table of persistent
+  # Performs a Gem::Net::HTTP request of type +request_class+ on +uri+ returning
+  # a Gem::Net::HTTP response object.  request maintains a table of persistent
   # connections to reduce connect overhead.
 
   def request(uri, request_class, last_modified = nil)
@@ -323,14 +344,48 @@ class Gem::RemoteFetcher
   end
 
   def https?(uri)
-    uri.scheme.downcase == 'https'
+    uri.scheme.casecmp("https").zero?
   end
 
   def close_all
-    @pools.each_value {|pool| pool.close_all}
+    @pools.each_value(&:close_all)
   end
 
   private
+
+  # Creates +cache_dir+ so its writability can be probed, since File.writable?
+  # is false for a path that does not exist yet.
+
+  def ensure_writable_cache_dir(cache_dir)
+    require "fileutils"
+    begin
+      FileUtils.mkdir_p cache_dir
+    rescue SystemCallError
+      return false
+    end
+
+    File.writable?(cache_dir)
+  end
+
+  def atomic_copy(source_path, destination_path)
+    File.open(source_path, "rb") do |source|
+      # FileUtils.cp passed the source mode to File.open, so it only reached a
+      # file being created and the umask still applied to it. The writer
+      # already carries over the mode of a file it replaces.
+      mode = source.stat.mode & 0o777 & ~File.umask
+      replacing = File.exist?(destination_path)
+
+      Gem::AtomicFileWriter.open(destination_path) do |io|
+        IO.copy_stream(source, io)
+
+        begin
+          io.chmod(mode) unless replacing
+        rescue Errno::EPERM, Errno::EACCES
+          # the filesystem does not carry permissions
+        end
+      end
+    end
+  end
 
   def proxy_for(proxy, uri)
     Gem::Request.proxy_uri(proxy || Gem::Request.get_proxy_from_env(uri.scheme))
@@ -338,8 +393,7 @@ class Gem::RemoteFetcher
 
   def pools_for(proxy)
     @pool_lock.synchronize do
-      @pools[proxy] ||= Gem::Request::ConnectionPools.new proxy, @cert_files
+      @pools[proxy] ||= Gem::Request::ConnectionPools.new proxy, @cert_files, @pool_size
     end
   end
-
 end

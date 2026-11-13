@@ -7,49 +7,64 @@ assignees: ''
 
 ---
 
-Thank you for contributing to the [rubygems](https://github.com/rubygems/rubygems) repository, and specifically to the [Bundler](https://bundler.io/) gem.
+<!--
 
-Before processing your issue please confirm that:
+Thank you for contributing to the rubygems repository, and specifically to the Bundler gem.
 
-- [ ] You checked all the following documents and couldn't find a solution for your issue:
+Please fill in the following sections so we can process your issue as fast as possible
 
-- [Troubleshooting common issues](https://github.com/rubygems/bundler/blob/master/doc/TROUBLESHOOTING.md)
-- [Bundler documentation site](https://bundler.io/)
-- [Bundler man pages](https://bundler.io/man/bundle.1.html)
-- [Bundler command line reference](https://bundler.io/v2.0/commands.html)
+-->
 
-If you haven't done that, please do it before creating a new issue.
+### Describe the problem as clearly as you can
 
-Please answer the following questions so we can process your issue as fast as possible:
+<!-- Replace this with an explanation of your problem. Be as clear and precise as you can. -->
 
-1. Do you have a reproduction script? It would be really helpful for us if you provide one. Examples: [Sample repro script for Bundler issues](https://gist.github.com/xaviershay/6207550), [Another sample repro script for Bundler issues](https://gist.github.com/xaviershay/6295889).
+### Did you try upgrading rubygems & bundler?
 
-    Script URL: 
+<!--
 
-2. What are you trying to accomplish?
+Make sure you're using the latest version of both `bundler` and `rubygems`.
 
-    Your answer:
+Running `gem update --system` should get both installed on your system, and then
+`bundle update --bundler` should change your lockfile to use the new version of
+bundler that was just installed.
 
-3. What command did you run?
+It's likely that your issue has been fixed in recent versions, so just upgrading
+might do the trick, and will also save us some time :)
 
-    Your answer:
+-->
 
-4. What were you expecting to happen?
+### Post steps to reproduce the problem
 
-    Your answer:
+<!--
 
-5. What actually happened?
+Fill this with a list of steps maintainers can follow to reproduce your issue. Note that while you see this issue in your computer, maintainers might not see the same thing on theirs. There are many things that could influence this:
 
-    Your answer:
+* How your ruby is setup (OS package, from source, using a version manager).
+* How bundler & rubygems are configured.
+* The version of each involved piece of software that you are using.
+* ...
 
-6. Is there an exception backtrace? If so, please copy it below.
+The more complete the steps to simulate your particular environment are, the easier it will be for maintainers to reproduce your issue on their machines.
 
-    Your answer:
+Ideally, we recommend you set up the list of steps as a Dockerfile. A Dockerfile provides a neutral environment that should give the same results, no matter where it's run.
 
-7. Please run `bundle env` and paste the output below:
+-->
 
-    Your answer:
+### Which command did you run?
 
-For more information please check [Filing Issues: a guide](https://github.com/rubygems/rubygems/blob/master/bundler/doc/contributing/ISSUES.md).
+<!-- Replace this with the specific command that is causing trouble. -->
 
-Thank you!
+### What were you expecting to happen?
+
+<!-- Replace this with the results you expected before running the command. -->
+
+### What happened instead?
+
+````
+Replace this with the actual result you got. Paste the output of your command here.
+````
+
+### If not included with the output of your command, run `bundle env` and paste the output below
+
+<!-- Replace this with the result of `bundle env`. Don't forget to anonymize any private data! -->
